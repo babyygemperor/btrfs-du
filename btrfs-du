@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+_usage() {
+  cat <<EOF
+Usage: $0 [-s name|ref|exc|id] <btrfs-root-directory>
+
+  -s, --sort-by   sort key: name (default), ref (Usage referenced),
+                  exc (Usage exclusive), or id (Subvolume ID)
+EOF
+  exit 1
+}
+
+# defaults
+sort_by="name"
+
+# parse options
+while [[ $# -gt 0 && "$1" =~ ^- ]]; do
+  case "$1" in
+    -s|--sort-by)
+      [[ $# -lt 2 ]] && _usage
+      sort_by="$2"; shift 2;;
+    -h|--help) _usage;;
+    *) echo "Unknown option: $1" >&2; _usage;;
+  esac
+done
+
+# require exactly one arg left
+[[ $# -ne 1 ]] && _usage
+root=${1%/}
+root_base=$(basename "$root")
+
+# pick the right sort invocation
+case "$sort_by" in
+  name) sort_cmd=(sort -t$'\t' -k2,2) ;;
+  ref)  sort_cmd=(sort -t$'\t' -k3,3h) ;;
+  exc)  sort_cmd=(sort -t$'\t' -k4,4h) ;;
+  id)   sort_cmd=(sort -t$'\t' -k1,1n) ;;
+  *)
+    echo "Invalid sort key: $sort_by" >&2
+    _usage
+    ;;
+esac
+
+# function: emit raw rows (no header)
+generate_rows() {
+  btrfs subvolume list -o -r "$root" \
+    | awk -F' path ' '{print $2}' \
+    | while IFS= read -r rel; do
+        # strip leading/trailing whitespace
+        rel="${rel##+([[:space:]])}"
+        rel="${rel%%+([[:space:]])}"
+
+        # try direct path, else strip an extra root_base prefix
+        candidate="$root/$rel"
+        [[ ! -e "$candidate" ]] && candidate="$root/${rel#"$root_base"/}"
+        if [[ ! -e "$candidate" ]]; then
+          echo "Warning: cannot find path '$rel'" >&2
+          continue
+        fi
+
+        # capture the show output
+        info=$(btrfs subvolume show "$candidate" 2>/dev/null) || {
+          echo "Warning: show failed for '$candidate'" >&2
+          continue
+        }
+
+        # extract fields
+        id=$(sed -n 's/^[[:space:]]*Subvolume ID:[[:space:]]*//p' <<<"$info" | head -1)
+        name=$(sed -n 's/^[[:space:]]*Name:[[:space:]]*//p' <<<"$info" | head -1)
+        ref=$(sed -n 's/^[[:space:]]*Usage referenced:[[:space:]]*//p' <<<"$info" | head -1)
+        exc=$(sed -n 's/^[[:space:]]*Usage exclusive:[[:space:]]*//p' <<<"$info" | head -1)
+
+        # fallbacks
+        [[ -z "$id"   ]] && id="N/A"
+        [[ -z "$name" ]] && name="$rel"
+        [[ -z "$ref"  ]] && ref="N/A"
+        [[ -z "$exc"  ]] && exc="N/A"
+
+        # print a tab-separated line
+        printf '%s\t%s\t%s\t%s\n' "$id" "$name" "$ref" "$exc"
+      done
+}
+
+# sort the rows (header will not be included here)
+sorted_rows=$(generate_rows | "${sort_cmd[@]}")
+
+# now combine header + sorted rows, align, and inject the separator
+{
+  # 1) raw header (tabs)
+  echo -e "ID\tName\tUsage referenced\tUsage exclusive"
+  # 2) the data
+  printf '%s\n' "$sorted_rows"
+} \
+  | column -t -s $'\t' \
+  | awk '
+      NR==1 {
+        # print header
+        print
+        # build and print a line of dashes as long as the header
+        len = length($0)
+        sep = ""
+        for (i=1; i<=len; i++) sep = sep "-"
+        print sep
+        next
+      }
+      { print }
+    '
