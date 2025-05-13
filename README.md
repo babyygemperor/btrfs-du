@@ -19,7 +19,7 @@ Usage: /usr/local/sbin/btrfs-snapshots-du [-s name|ref|exc|id] <btrfs-root-direc
 ## Example Output
 
 ```
-$ btrfs-du /singularitaettssauerkraut2/media
+$ btrfs-du /singularitaettssauerkraut2/photos
 
 ID     Name                  Usage referenced  Usage exclusive
 --------------------------------------------------------------
