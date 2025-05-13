@@ -1,7 +1,7 @@
 # btrfs-du
 Print BTRFS snapshots disk usage
 
-This project is inspired by https://github.com/nachoparker/btrfs-du however it stopped working on my machien after updating the kernel from v6.9.14 to v6.12.22, therefore I made my own.
+This project is inspired by https://github.com/nachoparker/btrfs-du however it stopped working on my machine after updating the kernel from v6.9.14 to v6.12.22, therefore I made my own.
 
 This does NOT require quotas to be enabled.
 
