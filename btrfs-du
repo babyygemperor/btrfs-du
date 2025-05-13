@@ -25,12 +25,11 @@ while [[ $# -gt 0 && "$1" =~ ^- ]]; do
   esac
 done
 
-# require exactly one arg left
 [[ $# -ne 1 ]] && _usage
 root=${1%/}
 root_base=$(basename "$root")
 
-# pick the right sort invocation
+# choose sort
 case "$sort_by" in
   name) sort_cmd=(sort -t$'\t' -k2,2) ;;
   ref)  sort_cmd=(sort -t$'\t' -k3,3h) ;;
@@ -42,67 +41,88 @@ case "$sort_by" in
     ;;
 esac
 
-# function: emit raw rows (no header)
+# generate raw rows
 generate_rows() {
   btrfs subvolume list -o -r "$root" \
     | awk -F' path ' '{print $2}' \
     | while IFS= read -r rel; do
-        # strip leading/trailing whitespace
         rel="${rel##+([[:space:]])}"
         rel="${rel%%+([[:space:]])}"
 
-        # try direct path, else strip an extra root_base prefix
         candidate="$root/$rel"
         [[ ! -e "$candidate" ]] && candidate="$root/${rel#"$root_base"/}"
-        if [[ ! -e "$candidate" ]]; then
-          echo "Warning: cannot find path '$rel'" >&2
-          continue
-        fi
+        [[ ! -e "$candidate" ]] && { echo "Warning: cannot find path '$rel'" >&2; continue; }
 
-        # capture the show output
         info=$(btrfs subvolume show "$candidate" 2>/dev/null) || {
-          echo "Warning: show failed for '$candidate'" >&2
-          continue
+          echo "Warning: show failed for '$candidate'" >&2; continue
         }
 
-        # extract fields
         id=$(sed -n 's/^[[:space:]]*Subvolume ID:[[:space:]]*//p' <<<"$info" | head -1)
-        name=$(sed -n 's/^[[:space:]]*Name:[[:space:]]*//p' <<<"$info" | head -1)
+        name=$(sed -n 's/^[[:space:]]*Name:[[:space:]]*//p'      <<<"$info" | head -1)
         ref=$(sed -n 's/^[[:space:]]*Usage referenced:[[:space:]]*//p' <<<"$info" | head -1)
-        exc=$(sed -n 's/^[[:space:]]*Usage exclusive:[[:space:]]*//p' <<<"$info" | head -1)
+        exc=$(sed -n 's/^[[:space:]]*Usage exclusive:[[:space:]]*//p'  <<<"$info" | head -1)
 
-        # fallbacks
         [[ -z "$id"   ]] && id="N/A"
         [[ -z "$name" ]] && name="$rel"
         [[ -z "$ref"  ]] && ref="N/A"
         [[ -z "$exc"  ]] && exc="N/A"
 
-        # print a tab-separated line
         printf '%s\t%s\t%s\t%s\n' "$id" "$name" "$ref" "$exc"
       done
 }
 
-# sort the rows (header will not be included here)
-sorted_rows=$(generate_rows | "${sort_cmd[@]}")
+# sort
+sorted=$(generate_rows | "${sort_cmd[@]}")
 
-# now combine header + sorted rows, align, and inject the separator
+# sum up Usage exclusive
+total_exc=$(printf '%s\n' "$sorted" | \
+  awk -F'\t' '
+    function to_bytes(v,u){
+      return (u=="B"?v:
+             u=="KiB"?v*1024:
+             u=="MiB"?v*(1024^2):
+             u=="GiB"?v*(1024^3):
+             u=="TiB"?v*(1024^4):v)
+    }
+    function human(b){
+      if(b>=1024^4){unit="TiB"; val=b/(1024^4)}
+      else if(b>=1024^3){unit="GiB"; val=b/(1024^3)}
+      else if(b>=1024^2){unit="MiB"; val=b/(1024^2)}
+      else if(b>=1024){unit="KiB"; val=b/1024}
+      else{unit="B"; val=b}
+      return sprintf("%.2f%s", val, unit)
+    }
+    /^[0-9]/ {
+      size=$4
+      if(size=="N/A") next
+      match(size,/([0-9.]+)([KMGTP]?i?B)/,a)
+      sum+=to_bytes(a[1],a[2])
+    }
+    END { print human(sum) }
+  ')
+
+# assemble, align, and inject separators
 {
-  # 1) raw header (tabs)
   echo -e "ID\tName\tUsage referenced\tUsage exclusive"
-  # 2) the data
-  printf '%s\n' "$sorted_rows"
+  printf '%s\n' "$sorted"
+  # summary marker
+  printf '\tTotal\t\t%s\n' "$total_exc"
 } \
   | column -t -s $'\t' \
   | awk '
-      NR==1 {
-        # print header
-        print
-        # build and print a line of dashes as long as the header
-        len = length($0)
-        sep = ""
-        for (i=1; i<=len; i++) sep = sep "-"
-        print sep
-        next
-      }
-      { print }
-    '
+    NR==1 {
+      header = $0
+      print
+      sep = sprintf("%*s", length(header), "")
+      gsub(/ /, "-", sep)
+      print sep
+      next
+    }
+    # detect the Total line by the literal word "Total" in the Name column
+    /^[[:space:]]*Total/ {
+      print sep
+      print
+      next
+    }
+    { print }
+  '
